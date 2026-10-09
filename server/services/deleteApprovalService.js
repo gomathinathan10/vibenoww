@@ -73,6 +73,7 @@ export async function initiateDeletion({
   adminId = null,
   targetType,
   targetId,
+  targetName: providedTargetName = '',
   reason,
   ip = '127.0.0.1',
   userAgent = 'Admin Portal'
@@ -93,7 +94,7 @@ export async function initiateDeletion({
   }
 
   let targetRecord = null;
-  let targetName = '';
+  let targetName = String(providedTargetName || '').trim();
   let targetSummary = '';
   let actionType = 'PERMANENT_DELETE';
   let cascadeNotes = [];
@@ -108,7 +109,7 @@ export async function initiateDeletion({
         throw new Error(`Creator record #${targetId} not found.`);
       }
       targetRecord = rows[0];
-      targetName = targetRecord.name || targetRecord.studio_name || `Creator #${targetId}`;
+      targetName = targetRecord.name || targetRecord.studio_name || targetName || `Creator #${targetId}`;
 
       // Check cascade / relationship safety:
       // Does creator have historical bookings or completed shoots?
@@ -122,7 +123,7 @@ export async function initiateDeletion({
         [targetRecord.id]
       );
 
-      const completedOrActive = shoots.filter(s => ['CONFIRMED', 'SHOOT_IN_PROGRESS', 'IN_PROGRESS', 'COMPLETED'].includes(s.status));
+      const completedOrActive = shoots.filter(s => ['CONFIRMED', 'SHOOT_IN_PROGRESS', 'IN_PROGRESS', 'COMPLETED', 'ASSIGNED', 'PHOTOGRAPHER_MATCHED'].includes(s.status));
 
       if (completedOrActive.length > 0 || payments.length > 0) {
         // High business integrity requirement: Soft delete / Archive to preserve financial history!
@@ -207,10 +208,45 @@ export async function initiateDeletion({
 
   } else {
     // Memory store fallback
-    targetName = `${targetType} #${targetId}`;
-    actionType = `DELETE_${normType.toUpperCase()}`;
-    targetSummary = `Record #${targetId}`;
-    cascadeNotes.push('Resilient memory-mode record.');
+    if (normType === 'photographer' || normType === 'creator') {
+      const found = (memoryStore.photographers || []).find(p => String(p.id) === String(targetId) || p.phone === targetId);
+      if (found) {
+        targetName = found.studioName || found.name || targetName || `Creator #${targetId}`;
+        const shoots = (memoryStore.orders || []).filter(s => String(s.assignedPhotographerId) === String(found.id));
+        const completedOrActive = shoots.filter(s => ['CONFIRMED', 'SHOOT_IN_PROGRESS', 'IN_PROGRESS', 'COMPLETED', 'ASSIGNED', 'PHOTOGRAPHER_MATCHED'].includes(s.status));
+        if (completedOrActive.length > 0) {
+          actionType = 'ARCHIVE_CREATOR';
+          cascadeNotes.push(`Creator has ${completedOrActive.length} active shoots. Will be archived.`);
+        } else {
+          actionType = 'DELETE_CREATOR';
+          cascadeNotes.push('Clean creator account with 0 historical shoots. Safe for permanent deletion.');
+        }
+      } else {
+        targetName = targetName || `Creator #${targetId}`;
+        actionType = 'DELETE_CREATOR';
+        cascadeNotes.push('Creator record in memory. Safe for permanent deletion.');
+      }
+    } else if (normType === 'order' || normType === 'booking') {
+      const found = (memoryStore.orders || []).find(o => String(o.id) === String(targetId) || o.workCode === targetId);
+      if (found) {
+        targetName = `${found.workCode || found.id} — ${found.customerName || 'Customer'}`;
+        actionType = ['COMPLETED', 'CONFIRMED'].includes(found.status) ? 'ARCHIVE_ORDER' : 'DELETE_ORDER';
+      } else {
+        targetName = targetName || `Order #${targetId}`;
+        actionType = 'DELETE_ORDER';
+      }
+      cascadeNotes.push('Order record. Safe for deletion.');
+    } else {
+      targetName = targetName || `${targetType} #${targetId}`;
+      actionType = `DELETE_${normType.toUpperCase()}`;
+      cascadeNotes.push('Record safe for deletion.');
+    }
+    targetSummary = targetName;
+  }
+
+  // Ensure targetName is never empty
+  if (!targetName || !targetName.trim()) {
+    targetName = `${normType} #${targetId}`;
   }
 
   // Generate cryptographic single-use token
@@ -368,58 +404,75 @@ export async function confirmDeletion({
 
     const { action_type: actionType, target_id: actualTargetId } = approval;
 
-    // EXECUTE ACTION SAFELY
-    if (actionType === 'ARCHIVE_CREATOR') {
-      // Soft-delete creator: deactivate, preserve historical shoots
-      await pool.query(
-        `UPDATE photographers 
-         SET status = 'INACTIVE', approval_status = 'REJECTED' 
-         WHERE id = ?`,
-        [actualTargetId]
-      );
-      // Release future availability
-      await pool.query('DELETE FROM availability WHERE photographer_id = ? AND status = "AVAILABLE"', [actualTargetId]);
-      // Update linked user if exists
-      const [uRows] = await pool.query('SELECT user_id, phone, email FROM photographers WHERE id = ?', [actualTargetId]);
-      if (uRows.length > 0 && uRows[0].user_id) {
-        await pool.query('UPDATE users SET status = "INACTIVE" WHERE id = ?', [uRows[0].user_id]);
+    // EXECUTE ACTION SAFELY WITH TRANSACTION
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      if (actionType === 'ARCHIVE_CREATOR') {
+        // Soft-delete creator: deactivate, preserve historical shoots
+        await connection.query(
+          `UPDATE photographers 
+           SET status = 'INACTIVE', approval_status = 'REJECTED' 
+           WHERE id = ?`,
+          [actualTargetId]
+        );
+        // Release future availability
+        await connection.query('DELETE FROM availability WHERE photographer_id = ? AND status = "AVAILABLE"', [actualTargetId]);
+        // Update linked user if exists
+        const [uRows] = await connection.query('SELECT user_id, phone, email FROM photographers WHERE id = ?', [actualTargetId]);
+        if (uRows.length > 0 && uRows[0].user_id) {
+          await connection.query('UPDATE users SET status = "INACTIVE" WHERE id = ?', [uRows[0].user_id]);
+        }
+      } else if (actionType === 'DELETE_CREATOR') {
+        // Safe cascade sub-tables if present
+        try { await connection.query('DELETE FROM photographer_portfolio WHERE photographer_id = ?', [actualTargetId]); } catch (e) {}
+        try { await connection.query('DELETE FROM photographer_pricing WHERE photographer_id = ?', [actualTargetId]); } catch (e) {}
+        try { await connection.query('DELETE FROM photographer_equipment WHERE photographer_id = ?', [actualTargetId]); } catch (e) {}
+        try { await connection.query('DELETE FROM portfolio_items WHERE photographer_id = ?', [actualTargetId]); } catch (e) {}
+        try { await connection.query('DELETE FROM creators WHERE id = ?', [actualTargetId]); } catch (e) {}
+
+        const [uRows] = await connection.query('SELECT user_id, phone, email FROM photographers WHERE id = ?', [actualTargetId]);
+        await connection.query('DELETE FROM availability WHERE photographer_id = ?', [actualTargetId]);
+        await connection.query('UPDATE orders SET assigned_photographer_id = NULL, assigned_photographer_name = NULL WHERE assigned_photographer_id = ?', [actualTargetId]);
+        await connection.query('DELETE FROM photographers WHERE id = ?', [actualTargetId]);
+        if (uRows.length > 0 && uRows[0].user_id) {
+          await connection.query('DELETE FROM users WHERE id = ? AND role = "PHOTOGRAPHER"', [uRows[0].user_id]);
+        }
+      } else if (actionType === 'ARCHIVE_ORDER') {
+        // Soft-delete order
+        await connection.query(
+          `UPDATE orders SET status = 'CANCELLED' WHERE id = ? OR work_code = ?`,
+          [actualTargetId, actualTargetId]
+        );
+        await connection.query('DELETE FROM availability WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
+      } else if (actionType === 'DELETE_ORDER') {
+        // Safe permanent deletion of order
+        await connection.query('DELETE FROM availability WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
+        await connection.query('DELETE FROM quotations WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
+        await connection.query('DELETE FROM payments WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
+        await connection.query('DELETE FROM orders WHERE id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
+      } else if (actionType === 'DELETE_USER') {
+        await connection.query('DELETE FROM users WHERE id = ? AND role != "ADMIN"', [actualTargetId]);
+      } else if (actionType === 'DELETE_LEAD') {
+        await connection.query('DELETE FROM inquiries WHERE id = ?', [actualTargetId]);
+      } else if (actionType === 'DELETE_QUOTATION') {
+        await connection.query('DELETE FROM quotations WHERE id = ?', [actualTargetId]);
+      } else if (actionType === 'DELETE_SERVICE') {
+        // Service deletion if custom table exists
       }
-    } else if (actionType === 'DELETE_CREATOR') {
-      // Safe permanent deletion: 0 historical shoots
-      const [uRows] = await pool.query('SELECT user_id, phone, email FROM photographers WHERE id = ?', [actualTargetId]);
-      await pool.query('DELETE FROM availability WHERE photographer_id = ?', [actualTargetId]);
-      await pool.query('UPDATE orders SET assigned_photographer_id = NULL, assigned_photographer_name = NULL WHERE assigned_photographer_id = ?', [actualTargetId]);
-      await pool.query('DELETE FROM photographers WHERE id = ?', [actualTargetId]);
-      if (uRows.length > 0 && uRows[0].user_id) {
-        await pool.query('DELETE FROM users WHERE id = ? AND role = "PHOTOGRAPHER"', [uRows[0].user_id]);
-      }
-    } else if (actionType === 'ARCHIVE_ORDER') {
-      // Soft-delete order
-      await pool.query(
-        `UPDATE orders SET status = 'CANCELLED' WHERE id = ? OR work_code = ?`,
-        [actualTargetId, actualTargetId]
-      );
-      await pool.query('DELETE FROM availability WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
-    } else if (actionType === 'DELETE_ORDER') {
-      // Safe permanent deletion of order
-      await pool.query('DELETE FROM availability WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
-      await pool.query('DELETE FROM quotations WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
-      await pool.query('DELETE FROM payments WHERE work_id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
-      await pool.query('DELETE FROM orders WHERE id = ? OR work_code = ?', [actualTargetId, actualTargetId]);
-    } else if (actionType === 'DELETE_USER') {
-      await pool.query('DELETE FROM users WHERE id = ? AND role != "ADMIN"', [actualTargetId]);
-    } else if (actionType === 'DELETE_LEAD') {
-      await pool.query('DELETE FROM inquiries WHERE id = ?', [actualTargetId]);
-    } else if (actionType === 'DELETE_QUOTATION') {
-      await pool.query('DELETE FROM quotations WHERE id = ?', [actualTargetId]);
-    } else if (actionType === 'DELETE_SERVICE') {
-      // Service deletion if custom table exists
+
+      // Mark token as confirmed/used inside transaction
+      await connection.query('UPDATE deletion_approvals SET status = "CONFIRMED" WHERE id = ?', [approval.id]);
+
+      await connection.commit();
+    } catch (txErr) {
+      await connection.rollback();
+      throw txErr;
+    } finally {
+      connection.release();
     }
 
-    // Mark token as confirmed/used
-    await pool.query('UPDATE deletion_approvals SET status = "CONFIRMED" WHERE id = ?', [approval.id]);
-
-    // Permanent Audit Record
+    // Permanent Audit Record after transaction committed
     await recordAuditLog({
       adminId,
       adminEmail,
@@ -434,9 +487,14 @@ export async function confirmDeletion({
       userAgent
     });
 
+    const displayName = (approval.target_name && approval.target_name.trim()) ? approval.target_name.trim() : `#${actualTargetId}`;
+    const finalMsg = actionType.startsWith('ARCHIVE')
+      ? `Record ${displayName} archived successfully.`
+      : `Record ${displayName} permanently deleted successfully.`;
+
     return {
       success: true,
-      message: `Record ${approval.target_name || actualTargetId} successfully ${actionType.startsWith('ARCHIVE') ? 'archived' : 'permanently deleted'}.`,
+      message: finalMsg,
       actionType,
       targetType: approval.target_type,
       targetId: actualTargetId
@@ -450,27 +508,76 @@ export async function confirmDeletion({
     }
     const app = memoryStore.deletionApprovals[appIndex];
     if (app.status !== 'PENDING') {
-      throw new Error(`Token already ${app.status.toLowerCase()}.`);
+      throw new Error(`Deletion token has already been ${app.status.toLowerCase()}. Each token is strictly single-use.`);
+    }
+
+    // Expiry check
+    const expiryDate = new Date(app.expires_at);
+    if (expiryDate < new Date()) {
+      app.status = 'EXPIRED';
+      await recordAuditLog({
+        adminId, adminEmail, adminName,
+        action: 'DELETE_REJECTED_EXPIRED_TOKEN',
+        targetType: app.target_type,
+        targetId: app.target_id,
+        reason: 'Approval token expired (exceeded 5 minutes)',
+        result: 'BLOCKED',
+        ip, userAgent
+      });
+      throw new Error('Deletion approval session has expired (exceeded 5 minutes). Please restart from Step 1.');
+    }
+
+    // Target match check
+    if (targetId && String(app.target_id) !== String(targetId)) {
+      throw new Error('Token does not match the target record ID.');
+    }
+    if (targetType && app.target_type.toLowerCase() !== String(targetType).toLowerCase()) {
+      throw new Error('Token does not match the target record type.');
     }
 
     app.status = 'CONFIRMED';
     const normType = app.target_type;
     const actualTargetId = app.target_id;
+    const actionType = app.action_type || 'DELETE_RECORD';
 
-    if (normType === 'photographer' || normType === 'creator') {
-      memoryStore.photographers = memoryStore.photographers.filter(p => p.id !== actualTargetId);
-      memoryStore.availability = memoryStore.availability.filter(a => a.photographer_id !== actualTargetId);
+    let actionTaken = 'DELETED';
+    if (actionType === 'ARCHIVE_CREATOR') {
+      actionTaken = 'ARCHIVED';
+      const p = (memoryStore.photographers || []).find(x => String(x.id) === String(actualTargetId));
+      if (p) {
+        p.status = 'INACTIVE';
+        p.approvalStatus = 'DEACTIVATED';
+        p.active = false;
+        p.archived = true;
+      }
+    } else if (normType === 'photographer' || normType === 'creator') {
+      memoryStore.photographers = (memoryStore.photographers || []).filter(p => String(p.id) !== String(actualTargetId));
+      memoryStore.availability = (memoryStore.availability || []).filter(a => String(a.photographer_id) !== String(actualTargetId));
+      (memoryStore.orders || []).forEach(o => {
+        if (String(o.assignedPhotographerId) === String(actualTargetId)) {
+          o.assignedPhotographerId = null;
+          o.assignedPhotographerName = null;
+        }
+      });
+    } else if (actionType === 'ARCHIVE_ORDER') {
+      actionTaken = 'ARCHIVED';
+      const o = (memoryStore.orders || []).find(x => String(x.id) === String(actualTargetId) || x.workCode === actualTargetId);
+      if (o) {
+        o.status = 'CANCELLED';
+        o.archived = true;
+      }
     } else if (normType === 'order' || normType === 'booking') {
-      memoryStore.orders = memoryStore.orders.filter(o => o.id !== Number(actualTargetId) && o.workCode !== actualTargetId && o.id !== actualTargetId);
+      memoryStore.orders = (memoryStore.orders || []).filter(o => String(o.id) !== String(actualTargetId) && o.workCode !== actualTargetId);
+      memoryStore.availability = (memoryStore.availability || []).filter(a => String(a.work_id) !== String(actualTargetId) && a.work_code !== actualTargetId);
     } else if (normType === 'user' || normType === 'customer') {
-      memoryStore.users = memoryStore.users.filter(u => u.id !== Number(actualTargetId) && u.role !== 'ADMIN');
+      memoryStore.users = (memoryStore.users || []).filter(u => String(u.id) !== String(actualTargetId) && u.role !== 'ADMIN');
     }
 
     await recordAuditLog({
       adminId,
       adminEmail,
       adminName,
-      action: app.action_type || 'DELETE_RECORD',
+      action: actionType,
       targetType: normType,
       targetId: actualTargetId,
       targetDetails: app.target_details,
@@ -480,10 +587,16 @@ export async function confirmDeletion({
       userAgent
     });
 
+    const displayName = (app.target_name && app.target_name.trim()) ? app.target_name.trim() : `#${actualTargetId}`;
+    const finalMsg = actionType.startsWith('ARCHIVE')
+      ? `Record ${displayName} archived successfully.`
+      : `Record ${displayName} permanently deleted successfully.`;
+
     return {
       success: true,
-      message: `Record ${app.target_name || actualTargetId} deleted successfully.`,
-      actionType: app.action_type,
+      message: finalMsg,
+      actionType,
+      actionTaken,
       targetType: normType,
       targetId: actualTargetId
     };

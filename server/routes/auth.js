@@ -2,6 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDbPool, isDbConnected, memoryStore } from '../config/db.js';
+import { requestPasswordResetOtp, verifyPasswordResetOtp, executePasswordReset } from '../services/passwordResetService.js';
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'vibenoww_production_jwt_secret_key_2026';
@@ -570,4 +571,82 @@ router.post('/logout', (req, res) => {
   return res.json({ success: true, message: 'Logged out successfully' });
 });
 
+/**
+ * POST /api/auth/forgot-password/request
+ * Initiate Creator Forgot Password with OTP dispatch
+ */
+router.post('/forgot-password/request', async (req, res) => {
+  try {
+    const identifier = req.body.identifier || req.body.email || req.body.phone || req.body.mobile || '';
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
+
+    const result = await requestPasswordResetOtp({ identifier, ip });
+
+    if (!result.success) {
+      if (result.cooldown || result.rateLimited) {
+        return res.status(429).json(result);
+      }
+      if (result.deliveryFailed) {
+        return res.status(500).json(result);
+      }
+      return res.status(400).json(result);
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Unhandled error in /forgot-password/request:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to process password reset request. Please try again later.'
+    });
+  }
+});
+
+/**
+ * POST /api/auth/forgot-password/verify
+ * Verify 6-digit OTP and obtain single-use reset authorization token
+ */
+router.post('/forgot-password/verify', async (req, res) => {
+  try {
+    const { identifier, requestId, otp } = req.body;
+    const result = await verifyPasswordResetOtp({ identifier, requestId, otp });
+
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Unhandled error in /forgot-password/verify:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to verify OTP. Please try again later.'
+    });
+  }
+});
+
+/**
+ * POST /api/auth/forgot-password/reset
+ * Set new password using single-use reset authorization token
+ */
+router.post('/forgot-password/reset', async (req, res) => {
+  try {
+    const { resetToken, newPassword, confirmPassword } = req.body;
+    const result = await executePasswordReset({ resetToken, newPassword, confirmPassword });
+
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Unhandled error in /forgot-password/reset:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to reset password. Please try again later.'
+    });
+  }
+});
+
 export default router;
+

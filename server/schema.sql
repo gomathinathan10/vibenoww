@@ -221,10 +221,36 @@ CREATE TABLE IF NOT EXISTS deletion_approvals (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ======================================================================
--- 12. Initial Required System Admin Account Only (Zero Dummy Data)
+-- 12. Password Resets Table (Secure Single-Use OTPs and Reset Tokens)
+-- ======================================================================
+CREATE TABLE IF NOT EXISTS password_resets (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  request_id VARCHAR(64) NOT NULL UNIQUE,
+  user_id INT NULL,
+  photographer_id VARCHAR(64) NULL,
+  identifier VARCHAR(255) NOT NULL,
+  target_type ENUM('EMAIL', 'PHONE') NOT NULL DEFAULT 'EMAIL',
+  target_destination VARCHAR(255) NOT NULL,
+  otp_hash VARCHAR(255) NOT NULL,
+  attempts INT DEFAULT 0,
+  max_attempts INT DEFAULT 5,
+  status ENUM('PENDING', 'VERIFIED', 'COMPLETED', 'EXPIRED', 'FAILED') DEFAULT 'PENDING',
+  reset_token VARCHAR(128) NULL UNIQUE,
+  token_expires_at DATETIME NULL,
+  expires_at DATETIME NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_reset_req (request_id),
+  INDEX idx_reset_token (reset_token),
+  INDEX idx_reset_identifier (identifier),
+  INDEX idx_reset_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ======================================================================
+-- 13. Initial Required System Admin Account Only (Zero Dummy Data)
 -- Password is encrypted with bcrypt for '123Hema!@#'
 -- ======================================================================
 INSERT INTO users (name, email, phone, password_hash, role, status)
 SELECT 'VibeNoww Admin', 'admin@vibenoww.com', '+91 98401 55667', '$2b$10$F.TjPD4ri9ieEDAZwED4quUMm47Dev9VLeqVFDa77NbPQkHwO2eFK', 'ADMIN', 'ACTIVE'
 WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = 'admin@vibenoww.com');
+
 

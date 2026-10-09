@@ -468,6 +468,8 @@ router.post('/', async (req, res) => {
         startingPrice: Number(startingPrice) || 15000,
         experienceYears: Number(experienceYears) || 2,
         bio,
+        password_hash: passHash,
+        password: plainPass,
         status: 'ACTIVE',
         approval_status: 'PENDING',
         approvalStatus: 'PENDING',
@@ -479,6 +481,19 @@ router.post('/', async (req, res) => {
         blockedDates: []
       };
       memoryStore.photographers.unshift(newP);
+      memoryStore.users = memoryStore.users || [];
+      const newU = {
+        id: memoryStore.users.length + 10,
+        name,
+        email: finalEmail,
+        phone,
+        password_hash: passHash,
+        password: plainPass,
+        role: 'PHOTOGRAPHER',
+        status: 'ACTIVE'
+      };
+      memoryStore.users.unshift(newU);
+      newP.userId = newU.id;
       return res.status(201).json({ success: true, data: newP });
     }
   } catch (error) {
@@ -575,8 +590,15 @@ router.put('/:id/status', async (req, res) => {
       if (approvalStatus) {
         p.approval_status = approvalStatus;
         p.approvalStatus = approvalStatus;
+        if (approvalStatus === 'APPROVED' && (!status || status === 'PENDING')) p.status = 'ACTIVE';
       }
-      if (status) p.status = status;
+      if (status) {
+        p.status = status;
+        if (status === 'APPROVED' && (!approvalStatus || approvalStatus === 'PENDING')) {
+          p.approval_status = 'APPROVED';
+          p.approvalStatus = 'APPROVED';
+        }
+      }
       return res.json({ success: true, message: 'Status updated', data: p });
     }
   } catch (error) {

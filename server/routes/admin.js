@@ -177,7 +177,7 @@ router.get('/dashboard', async (req, res) => {
  */
 router.post('/delete/initiate', verifyAdminRequest, async (req, res) => {
   try {
-    const { targetType, targetId, reason } = req.body;
+    const { targetType, targetId, targetName, reason } = req.body;
     const admin = req.adminUser || {};
 
     const result = await initiateDeletion({
@@ -186,6 +186,7 @@ router.post('/delete/initiate', verifyAdminRequest, async (req, res) => {
       adminId: admin.id || null,
       targetType,
       targetId,
+      targetName,
       reason,
       ip: req.ip || req.connection?.remoteAddress,
       userAgent: req.headers['user-agent']
@@ -195,6 +196,66 @@ router.post('/delete/initiate', verifyAdminRequest, async (req, res) => {
   } catch (err) {
     console.error('Error initiating deletion approval:', err.message);
     return res.status(400).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/admin/delete/status
+ * Verifies if a record or token has already been confirmed/deleted (handles network uncertainty)
+ */
+router.get('/delete/status', verifyAdminRequest, async (req, res) => {
+  try {
+    const { token, targetType, targetId } = req.query;
+    let isDeleted = false;
+    let tokenStatus = null;
+
+    if (token) {
+      if (isDbConnected()) {
+        const pool = getDbPool();
+        const [rows] = await pool.query('SELECT status, target_type, target_id FROM deletion_approvals WHERE token = ? LIMIT 1', [token]);
+        if (rows.length > 0) {
+          tokenStatus = rows[0].status;
+          if (tokenStatus === 'CONFIRMED') isDeleted = true;
+        }
+      } else {
+        const app = (memoryStore.deletionApprovals || []).find(a => a.token === token);
+        if (app) {
+          tokenStatus = app.status;
+          if (tokenStatus === 'CONFIRMED') isDeleted = true;
+        }
+      }
+    }
+
+    if (targetType && targetId) {
+      const normType = String(targetType).toLowerCase();
+      if (isDbConnected()) {
+        const pool = getDbPool();
+        if (normType === 'photographer' || normType === 'creator') {
+          const [pRows] = await pool.query('SELECT id FROM photographers WHERE id = ?', [targetId]);
+          if (pRows.length === 0) isDeleted = true;
+        } else if (normType === 'order' || normType === 'booking') {
+          const [oRows] = await pool.query('SELECT id FROM orders WHERE id = ? OR work_code = ?', [targetId, targetId]);
+          if (oRows.length === 0) isDeleted = true;
+        }
+      } else {
+        if (normType === 'photographer' || normType === 'creator') {
+          const exists = (memoryStore.photographers || []).some(p => String(p.id) === String(targetId));
+          if (!exists) isDeleted = true;
+        } else if (normType === 'order' || normType === 'booking') {
+          const exists = (memoryStore.orders || []).some(o => String(o.id) === String(targetId) || o.workCode === targetId);
+          if (!exists) isDeleted = true;
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      isDeleted,
+      exists: !isDeleted,
+      tokenStatus
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -257,16 +318,17 @@ router.post('/delete/cancel', verifyAdminRequest, async (req, res) => {
  * GET /api/admin/audit-logs
  * Retrieve permanent deletion audit logs
  */
-router.get('/audit-logs', verifyAdminRequest, async (req, res) => {
+router.get(['/audit-logs', '/delete/audit'], verifyAdminRequest, async (req, res) => {
   try {
     if (isDbConnected()) {
       const pool = getDbPool();
       const [rows] = await pool.query(
         'SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100'
       );
-      return res.json({ success: true, data: rows });
+      return res.json({ success: true, data: rows, logs: rows });
     } else {
-      return res.json({ success: true, data: memoryStore.auditLogs || [] });
+      const logs = memoryStore.auditLogs || [];
+      return res.json({ success: true, data: logs, logs: logs });
     }
   } catch (err) {
     console.error('Error retrieving audit logs:', err.message);

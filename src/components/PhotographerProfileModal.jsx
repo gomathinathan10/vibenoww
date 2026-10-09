@@ -90,7 +90,7 @@ export const PhotographerProfileModal = ({ photographer, isOpen, onClose, onBook
           <div style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.1)', gap: '24px', marginBottom: '24px' }}>
             {[
               { id: 'portfolio', label: `Portfolio Gallery (${photographer.portfolio?.length || 0})` },
-              { id: 'packages', label: `Pricing Packages (${photographer.packages?.length || 0})` },
+              { id: 'packages', label: `Packages (${photographer.packages?.length || 0})` },
               { id: 'about', label: 'Biography & Gear' }
             ].map(tab => (
               <button
@@ -139,14 +139,14 @@ export const PhotographerProfileModal = ({ photographer, isOpen, onClose, onBook
 
           {activeTab === 'packages' && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-              {photographer.packages?.map((pkg, idx) => (
+              {(photographer.packages && photographer.packages.length > 0 ? photographer.packages : [
+                { features: ['4 Hours Professional Event Coverage', '50+ Master Color-Graded Stills', 'Private Online Delivery Gallery', 'Fast 7-Day Digital Turnaround'] },
+                { features: ['Full Day Coverage (Up to 8 Hours)', 'Lead Senior Photographer & Dedicated Assistant', '150+ High-Resolution Master Stills', 'Cloud Storage & High-Speed Download Access'] },
+                { features: ['Multi-Camera Team Coverage', 'Complete Celebration & Reception', '4K Teaser Reel & 250+ Edited Stills', 'Priority Turnaround & Dedicated Editing Team'] }
+              ]).map((pkg, idx) => (
                 <div key={idx} style={{ background: '#141c3b', border: '1px solid rgba(0, 210, 255, 0.3)', borderRadius: '16px', padding: '20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                   <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                      <h4 style={{ fontFamily: 'var(--font-sans)', fontSize: '1.1rem', fontWeight: '700', color: '#fff' }}>{pkg.name}</h4>
-                      <span style={{ fontSize: '1.3rem', fontWeight: '800', color: '#00d2ff' }}>₹{pkg.price?.toLocaleString('en-IN')}</span>
-                    </div>
-                    <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '20px' }}>
+                    <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '20px', padding: 0 }}>
                       {pkg.features?.map((feat, fidx) => (
                         <li key={fidx} style={{ fontSize: '0.85rem', color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <CheckCircle size={14} style={{ color: '#00d2ff', flexShrink: 0 }} /> {feat}

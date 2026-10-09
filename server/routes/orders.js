@@ -170,7 +170,7 @@ router.post('/', async (req, res) => {
     const finalReqs = requiredServices ? (Array.isArray(requiredServices) ? requiredServices.join(', ') : requiredServices) : (requirements || '');
     const finalNotes = customerNotes || customerMessage || '';
     const finalBudget = Number(estimatedBudget) || Number(budget) || 25000;
-    const initialStatus = assignedPhotographerId ? 'ASSIGNED' : 'NEW';
+    const initialStatus = req.body.status || (assignedPhotographerId ? 'ASSIGNED' : 'NEW');
 
     const initialTimeline = [
       {
